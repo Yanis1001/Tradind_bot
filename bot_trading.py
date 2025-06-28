@@ -1,93 +1,96 @@
-
-import ccxt
-import pandas as pd
+import asyncio
 import time
-import requests
+import pandas as pd
+import ccxt
+from telegram import Bot
+from datetime import datetime
+import logging
 
-# Identifiants OKX
-api_key = '8683629e-376a-4f8f-8aa3-b1393f184d70'
-api_secret = 'CBD17C85B60BCFA86B9E2F9E9F6E5789'
-api_passphrase = 'Trading_Bot2026'
+# --- Config utilisateur ---
+API_KEY = "8683629e-376a-4f8f-8aa3-b1393f184d70"
+API_SECRET = "CBD17C85B60BCFA86B9E2F9E9F6E5789"
+API_PASSPHRASE = "Trading_Bot2026"
+TELEGRAM_TOKEN = "6590523947:AAE_FakDtTLOIKUoCL2opb1FHDyKk4UosA8"
+CHAT_ID = 6669494469
+SYMBOLS = ['BTC/USDT', 'XAU/USDT']
+INTERVAL = '15m'
+DELAY = 60 * 15  # toutes les 15 minutes
 
-# Telegram
-telegram_token = '6669494469:AAHpPWqE-vJMNkMZPeoU_4Y32bqOJHtNODc'
-chat_id = '6669494469'
+# --- Initialisation bot Telegram ---
+bot = Bot(token=TELEGRAM_TOKEN)
 
+# --- Initialisation OKX ---
 exchange = ccxt.okx({
-    'apiKey': api_key,
-    'secret': api_secret,
-    'password': api_passphrase,
+    'apiKey': API_KEY,
+    'secret': API_SECRET,
+    'password': API_PASSPHRASE,
     'enableRateLimit': True,
-    'options': {'defaultType': 'future'}
+    'options': {
+        'defaultType': 'future'
+    }
 })
 
-symbols = {
-    'BTC': 'BTC/USDT:USDT',
-    'GOLD': 'XAU/USDT:USDT'
-}
+# --- Fonctions d'analyse ---
+def analyse_technique(df):
+    df['ema'] = df['close'].ewm(span=20).mean()
+    df['rsi'] = compute_rsi(df['close'], 14)
+    df['macd'], df['signal'] = compute_macd(df['close'])
+    df['upper_bb'], df['lower_bb'] = compute_bollinger(df['close'])
 
-def send_telegram(message):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{telegram_token}/sendMessage",
-            data={"chat_id": chat_id, "text": message}
-        )
-    except Exception as e:
-        print(f"Erreur Telegram : {e}")
+    last = df.iloc[-1]
 
-def fetch_data(symbol):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    return df
+    if last['macd'] > last['signal'] and last['rsi'] < 60 and last['close'] < last['lower_bb']:
+        return "📈 Achat (Buy)"
+    elif last['macd'] < last['signal'] and last['rsi'] > 40 and last['close'] > last['upper_bb']:
+        return "📉 Vente (Sell)"
+    else:
+        return "⏸️ Aucun signal clair"
 
-def add_indicators(df):
-    df['SMA7'] = df['close'].rolling(7).mean()
-    df['SMA25'] = df['close'].rolling(25).mean()
-    delta = df['close'].diff()
+def compute_rsi(series, period=14):
+    delta = series.diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(14).mean()
-    avg_loss = loss.rolling(14).mean()
+    avg_gain = gain.rolling(window=period).mean()
+    avg_loss = loss.rolling(window=period).mean()
     rs = avg_gain / avg_loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    df['EMA12'] = df['close'].ewm(span=12).mean()
-    df['EMA26'] = df['close'].ewm(span=26).mean()
-    df['MACD'] = df['EMA12'] - df['EMA26']
-    df['Signal'] = df['MACD'].ewm(span=9).mean()
+    return 100 - (100 / (1 + rs))
+
+def compute_macd(series, short=12, long=26, signal=9):
+    ema_short = series.ewm(span=short).mean()
+    ema_long = series.ewm(span=long).mean()
+    macd = ema_short - ema_long
+    signal_line = macd.ewm(span=signal).mean()
+    return macd, signal_line
+
+def compute_bollinger(series, period=20, std=2):
+    ma = series.rolling(window=period).mean()
+    stddev = series.rolling(window=period).std()
+    upper = ma + std * stddev
+    lower = ma - std * stddev
+    return upper, lower
+
+# --- Récupération des données ---
+def get_ohlcv(symbol):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe=INTERVAL, limit=50)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     return df
 
-def analyze(df):
-    last = df.iloc[-1]
-    if last['SMA7'] > last['SMA25'] and last['MACD'] > last['Signal'] and last['RSI'] < 70:
-        return 'buy'
-    elif last['SMA7'] < last['SMA25'] and last['MACD'] < last['Signal'] and last['RSI'] > 30:
-        return 'sell'
-    else:
-        return 'hold'
+# --- Bot principal ---
+async def bot_main():
+    await bot.send_message(chat_id=CHAT_ID, text="🤖 Bot de trading lancé avec succès.")
 
-def place_order(symbol_name, symbol):
-    try:
-        df = fetch_data(symbol)
-        df = add_indicators(df)
-        signal = analyze(df)
-        balance = exchange.fetch_balance()
-        price = exchange.fetch_ticker(symbol)['last']
-        usdt = balance['total']['USDT']
-        amount = round(usdt * 0.3 / price, 3)
+    while True:
+        try:
+            for symbol in SYMBOLS:
+                df = get_ohlcv(symbol)
+                signal = analyse_technique(df)
+                await bot.send_message(chat_id=CHAT_ID, text=f"💹 {symbol}\nSignal : {signal}\n🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+            await asyncio.sleep(DELAY)
+        except Exception as e:
+            await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Erreur : {e}")
+            await asyncio.sleep(30)
 
-        if signal == 'buy':
-            exchange.create_market_buy_order(symbol, amount)
-            send_telegram(f"✅ [{symbol_name}] Achat de {amount} à {price} USD")
-        elif signal == 'sell':
-            exchange.create_market_sell_order(symbol, amount)
-            send_telegram(f"🔻 [{symbol_name}] Vente de {amount} à {price} USD")
-        else:
-            send_telegram(f"🤔 [{symbol_name}] Pas d’opportunité")
-    except Exception as e:
-        send_telegram(f"❌ [{symbol_name}] Erreur : {e}")
-
-send_telegram("🚀 Bot de trading automatique lancé.")
-while True:
-    for name, symbol in symbols.items():
-        place_order(name, symbol)
-    time.sleep(300)
+# --- Démarrage ---
+if __name__ == "__main__":
+    asyncio.run(bot_main())

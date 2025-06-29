@@ -2,9 +2,8 @@ import pandas as pd
 import ccxt
 import ta
 import time
-import asyncio
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import Updater, CommandHandler
+from telegram import ParseMode
 
 # === CONFIGURATION ===
 TELEGRAM_TOKEN = "8032643176:AAG3yOXI0czomp4T0GSyapXANU33E88Be8Q"
@@ -13,29 +12,17 @@ symbols = ['BTC/USDT', 'XAU/USDT']
 timeframe = '5m'
 limit = 100
 
-# TP / SL réalistes (atteignables en 15-30 min)
+exchange = ccxt.okx({'enableRateLimit': True})  # Pas besoin d'API pour les données publiques
+
 TP_SL_MARGIN = {
-    'BTC/USDT': {'tp': 30, 'sl': 20},
-    'XAU/USDT': {'tp': 0.25, 'sl': 0.15}
+    'BTC/USDT': {'tp': 50, 'sl': 30},
+    'XAU/USDT': {'tp': 0.3, 'sl': 0.2}
 }
 
-exchange = ccxt.okx({'enableRateLimit': True})
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# === Fonction d'envoi Telegram ===
-async def send_telegram_message(text):
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode="HTML")
-        print("[✅] Message Telegram envoyé.")
-    except Exception as e:
-        print(f"[❌] Erreur envoi Telegram : {e}")
-
-# === Analyse d’un actif ===
 def get_signal(symbol):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
         df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
         macd = ta.trend.MACD(df['close'])
         df['macd'] = macd.macd()
@@ -48,7 +35,7 @@ def get_signal(symbol):
         price = last['close']
         signal = None
 
-        if last['macd'] > last['macd_signal'] and last['rsi'] < 65 and price <= last['bb_lower']:
+        if last['macd'] > last['macd_signal'] and last['rsi'] < 65 and price < last['bb_lower']:
             entry_min = round(price * 0.998, 2)
             entry_max = round(price * 1.002, 2)
             tp = round(price + TP_SL_MARGIN[symbol]['tp'], 2)
@@ -59,11 +46,11 @@ def get_signal(symbol):
                 f"💰 <b>Entrée :</b> entre <code>{entry_min}</code> et <code>{entry_max}</code>\n"
                 f"🎯 <b>TP :</b> <code>{tp}</code>\n"
                 f"🛑 <b>SL :</b> <code>{sl}</code>\n"
-                f"🧠 <i>(RSI < 65, MACD croisé, proche BB inférieure)</i>\n"
-                f"🕐 <i>Analyse en M5</i>"
+                f"🧠 (RSI < 65, MACD croisé, proche BB inférieure)\n"
+                f"🕐 Analyse en M5"
             )
 
-        elif last['macd'] < last['macd_signal'] and last['rsi'] > 35 and price >= last['bb_upper']:
+        elif last['macd'] < last['macd_signal'] and last['rsi'] > 40 and price > last['bb_upper']:
             entry_min = round(price * 0.998, 2)
             entry_max = round(price * 1.002, 2)
             tp = round(price - TP_SL_MARGIN[symbol]['tp'], 2)
@@ -74,44 +61,41 @@ def get_signal(symbol):
                 f"💰 <b>Entrée :</b> entre <code>{entry_min}</code> et <code>{entry_max}</code>\n"
                 f"🎯 <b>TP :</b> <code>{tp}</code>\n"
                 f"🛑 <b>SL :</b> <code>{sl}</code>\n"
-                f"🧠 <i>(RSI > 35, MACD croisé, proche BB supérieure)</i>\n"
-                f"🕐 <i>Analyse en M5</i>"
+                f"🧠 (RSI > 40, MACD croisé, proche BB supérieure)\n"
+                f"🕐 Analyse en M5"
             )
 
         return signal
     except Exception as e:
-        return f"❌ <b>Erreur analyse {symbol} :</b> <code>{str(e)}</code>"
+        return f"❌ Erreur analyse {symbol} : <code>{str(e)}</code>"
 
-# === Commande Telegram : /signal ===
-async def manual_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_telegram_message("🔍 Analyse manuelle demandée...")
+def send_all_signals(update=None, context=None):
     for sym in symbols:
         signal = get_signal(sym)
         if signal:
-            await send_telegram_message(signal)
-        else:
-            await send_telegram_message(f"❌ Aucun signal clair pour <code>{sym}</code>.")
+            context.bot.send_message(chat_id=CHAT_ID, text=signal, parse_mode=ParseMode.HTML)
 
-# === Boucle principale ===
-async def main_loop():
-    await send_telegram_message("🤖 <b>Bot de signaux lancé !</b>\n📍 RSI, MACD, BBands\n🕐 M5 - Analyse toutes les 5 minutes")
-    while True:
-        for sym in symbols:
-            signal = get_signal(sym)
-            if signal:
-                await send_telegram_message(signal)
-            else:
-                print(f"[INFO] Aucun signal pour {sym}")
-        await asyncio.sleep(300)
+def start(update, context):
+    context.bot.send_message(chat_id=CHAT_ID, text="🤖 <b>Bot lancé avec succès !</b>\nEnvoyez /signal pour une analyse manuelle.", parse_mode=ParseMode.HTML)
 
-# === Lancement complet ===
-if __name__ == '__main__':
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("signal", manual_signal))
+def signal(update, context):
+    send_all_signals(update, context)
 
-    async def run_all():
-        task1 = asyncio.create_task(app.run_polling())
-        task2 = asyncio.create_task(main_loop())
-        await asyncio.gather(task1, task2)
+def periodic_signals(context):
+    send_all_signals(context=context)
 
-    asyncio.run(run_all())
+def main():
+    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
+    dispatcher = updater.dispatcher
+
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("signal", signal))
+
+    job_queue = updater.job_queue
+    job_queue.run_repeating(periodic_signals, interval=300, first=5)  # toutes les 5 min
+
+    updater.start_polling()
+    updater.idle()
+
+if __name__ == "__main__":
+    main()

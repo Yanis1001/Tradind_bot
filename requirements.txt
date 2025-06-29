@@ -1,4 +1,4 @@
 ccxt
-pandas
 ta
-python-telegram-bot==20.3
+pandas
+python-telegram-bot==13.15
